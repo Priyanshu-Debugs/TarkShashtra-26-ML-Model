@@ -1,33 +1,26 @@
 services:
   - type: web
-    name: tark-ml-api
-    env: python
-    rootDir: services/ml_api
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
-    envVars:
-      - key: MODEL_PATH
-        value: models/model.pkl
-      - key: LABEL_ENCODER_PATH
-        value: models/label_encoder.pkl
-      - key: RATE_LIMIT
-        value: 60/minute
-      - key: PREDICT_RATE_LIMIT
-        value: 30/minute
-  - type: web
     name: tark-core-api
     env: python
     rootDir: services/core_api
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
-      - key: ML_API_URL
-        value: https://tark-ml-api.onrender.com/predict
+      - key: USE_LOCAL_INFERENCE
+        value: "true"
+      - key: MODEL_PATH
+        value: ../ml_api/models/model.pkl
+      - key: REGRESSION_MODEL_PATH
+        value: ../ml_api/models/model_regression.pkl
+      - key: LABEL_ENCODER_PATH
+        value: ../ml_api/models/label_encoder.pkl
+      - key: MODEL_METADATA_PATH
+        value: ../ml_api/models/model_metadata.json
       - key: RATE_LIMIT
         value: 120/minute
       - key: PREDICT_RATE_LIMIT
         value: 60/minute
       - key: INTERVENTION_RATE_LIMIT
         value: 30/minute
-      - key: ML_API_TIMEOUT
-        value: 10
+      - key: ALERT_SCORE_THRESHOLD
+        value: 70

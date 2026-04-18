@@ -12,7 +12,9 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-app = FastAPI(title="TarkShashtra Core API", version="1.0.0")
+from .local_model import FEATURE_COLUMNS, model_store
+
+app = FastAPI(title="TarkShashtra Core API", version="1.1.0")
 
 limiter = Limiter(
     key_func=get_remote_address,
@@ -21,12 +23,16 @@ limiter = Limiter(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-ML_API_BASE_URL = os.getenv("ML_API_BASE_URL", "https://ml-api-ay0v.onrender.com")
-ML_API_FALLBACK_URL = os.getenv("ML_API_FALLBACK_URL", "http://localhost:8001")
+USE_LOCAL_INFERENCE = os.getenv("USE_LOCAL_INFERENCE", "true").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+ML_API_BASE_URL = os.getenv("ML_API_BASE_URL", "http://localhost:8001")
+ML_API_FALLBACK_URL = os.getenv("ML_API_FALLBACK_URL", "")
 ML_API_URL = os.getenv("ML_API_URL", f"{ML_API_BASE_URL}/predict")
-ML_API_BATCH_URL = os.getenv(
-    "ML_API_BATCH_URL", f"{ML_API_BASE_URL}/predict_batch"
-)
+ML_API_BATCH_URL = os.getenv("ML_API_BATCH_URL", f"{ML_API_BASE_URL}/predict_batch")
 ML_API_TIMEOUT = float(os.getenv("ML_API_TIMEOUT", "10"))
 ALERT_SCORE_THRESHOLD = float(os.getenv("ALERT_SCORE_THRESHOLD", "70"))
 
@@ -89,22 +95,147 @@ def _write_json(path: Path, data: list) -> None:
         json.dump(data, handle, indent=2)
 
 
-async def call_ml_api(payload: dict, url: str) -> dict:
+def _to_payload_dict(payload) -> dict:
     if hasattr(payload, "model_dump"):
-        payload_data = payload.model_dump()
-    elif hasattr(payload, "dict"):
-        payload_data = payload.dict()
-    else:
-        payload_data = payload
+        return payload.model_dump()
+    if hasattr(payload, "dict"):
+        return payload.dict()
+    return payload
+
+
+async def call_ml_api(payload: dict, url: str) -> dict:
+    payload_data = _to_payload_dict(payload)
     async with httpx.AsyncClient(timeout=ML_API_TIMEOUT) as client:
         try:
             resp = await client.post(url, json=payload_data)
-        except httpx.RequestError:
+        except httpx.RequestError as primary_exc:
+            if not ML_API_FALLBACK_URL:
+                raise HTTPException(status_code=503, detail=str(primary_exc))
             fallback_url = url.replace(ML_API_BASE_URL, ML_API_FALLBACK_URL)
             resp = await client.post(fallback_url, json=payload_data)
     if resp.status_code >= 400:
         raise HTTPException(status_code=resp.status_code, detail=resp.text)
     return resp.json()
+
+
+def to_feature_map(payload: PredictionRequest) -> dict:
+    return {
+        "assignment": payload.assignment,
+        "attendance": payload.attendance,
+        "lms": payload.lms,
+        "marks": payload.marks,
+    }
+
+
+def to_feature_vector(feature_map: dict) -> list[float]:
+    return [feature_map[name] for name in FEATURE_COLUMNS]
+
+
+def build_suggestions(
+    risk_label: str, reasons: List[dict], risk_score_value: Optional[float]
+) -> List[str]:
+    label = (risk_label or "").strip().lower()
+    suggestions: List[str] = []
+
+    if risk_score_value is not None:
+        if risk_score_value >= 70:
+            suggestions.extend(
+                [
+                    "Schedule weekly mentor check-ins and academic support.",
+                    "Create a short-term improvement plan with clear weekly goals.",
+                    "Engage guardians and monitor progress every 2 weeks.",
+                ]
+            )
+        elif risk_score_value >= 40:
+            suggestions.extend(
+                [
+                    "Set bi-weekly progress reviews and study targets.",
+                    "Focus on consistent assignment completion.",
+                    "Provide optional tutoring or peer support.",
+                ]
+            )
+        else:
+            suggestions.extend(
+                [
+                    "Maintain current study routine and attendance.",
+                    "Continue monthly performance monitoring.",
+                ]
+            )
+    elif label:
+        if label == "high":
+            suggestions.extend(
+                [
+                    "Schedule weekly mentor check-ins and academic support.",
+                    "Create a short-term improvement plan with clear weekly goals.",
+                    "Engage guardians and monitor progress every 2 weeks.",
+                ]
+            )
+        elif label == "medium":
+            suggestions.extend(
+                [
+                    "Set bi-weekly progress reviews and study targets.",
+                    "Focus on consistent assignment completion.",
+                    "Provide optional tutoring or peer support.",
+                ]
+            )
+        elif label == "low":
+            suggestions.extend(
+                [
+                    "Maintain current study routine and attendance.",
+                    "Continue monthly performance monitoring.",
+                ]
+            )
+
+    reason_map = {
+        "attendance": "Improve attendance with reminders and follow-up calls.",
+        "marks": "Offer subject-specific revision sessions and practice quizzes.",
+        "assignment": "Set a submission schedule and track weekly completion.",
+        "lms": "Increase LMS engagement with weekly activity goals.",
+        "risk_score": "Prioritize immediate intervention and closer monitoring.",
+    }
+
+    for reason in reasons:
+        feature = str(reason.get("feature", "")).strip().lower()
+        suggestion = reason_map.get(feature)
+        if suggestion:
+            suggestions.append(suggestion)
+
+    deduped: List[str] = []
+    seen = set()
+    for item in suggestions:
+        if item not in seen:
+            deduped.append(item)
+            seen.add(item)
+    return deduped
+
+
+def _local_predict(payload: PredictionRequest) -> dict:
+    feature_map = to_feature_map(payload)
+    predicted_score = model_store.predict_risk_score(to_feature_vector(feature_map))
+    calculated_score = model_store.calculate_risk_score(feature_map)
+    risk_score_value = predicted_score if predicted_score is not None else calculated_score
+    label, label_id, probs = model_store.predict(to_feature_vector(feature_map))
+    explain_map = dict(feature_map)
+    explain_map["risk_score"] = risk_score_value
+    reasons = model_store.explain(explain_map, max_items=3)
+    suggestions = build_suggestions(str(label), reasons, risk_score_value)
+
+    return {
+        "student_id": payload.student_id,
+        "class_id": payload.class_id,
+        "subject": payload.subject,
+        "risk_label": str(label),
+        "risk_label_id": int(label_id),
+        "probabilities": probs,
+        "risk_score_predicted": predicted_score,
+        "risk_score_calculated": calculated_score,
+        "reasons": reasons,
+        "suggestions": suggestions,
+    }
+
+
+def _local_predict_batch(payload: BatchPredictionRequest) -> dict:
+    return {"items": [_local_predict(item) for item in payload.items]}
 
 
 def intervention_rules(risk_label: str) -> List[str]:
@@ -129,21 +260,43 @@ def intervention_rules(risk_label: str) -> List[str]:
     return ["Review manually - label not recognized"]
 
 
+@app.on_event("startup")
+def startup_load_model() -> None:
+    if USE_LOCAL_INFERENCE:
+        model_store.load()
+
+
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "inference_mode": "local" if USE_LOCAL_INFERENCE else "remote",
+        "model_loaded": bool(model_store.model is not None) if USE_LOCAL_INFERENCE else None,
+    }
 
 
 @app.post("/predict")
 @limiter.limit(os.getenv("PREDICT_RATE_LIMIT", "60/minute"))
 async def predict(request: Request, payload: PredictionRequest) -> dict:
+    if USE_LOCAL_INFERENCE:
+        try:
+            return _local_predict(payload)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Local inference failed: {exc}")
     return await call_ml_api(payload, ML_API_URL)
 
 
 @app.post("/predict_batch")
 @limiter.limit(os.getenv("PREDICT_RATE_LIMIT", "60/minute"))
 async def predict_batch(request: Request, payload: BatchPredictionRequest) -> dict:
-    response = await call_ml_api(payload, ML_API_BATCH_URL)
+    if USE_LOCAL_INFERENCE:
+        try:
+            response = _local_predict_batch(payload)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Local inference failed: {exc}")
+    else:
+        response = await call_ml_api(payload, ML_API_BATCH_URL)
+
     items = response.get("items", [])
     _write_json(PREDICTIONS_FILE, items)
     return response
@@ -152,7 +305,7 @@ async def predict_batch(request: Request, payload: BatchPredictionRequest) -> di
 @app.post("/intervention")
 @limiter.limit(os.getenv("INTERVENTION_RATE_LIMIT", "30/minute"))
 async def intervention(request: Request, payload: PredictionRequest) -> dict:
-    result = await call_ml_api(payload, ML_API_URL)
+    result = await predict(request, payload)
     label = str(result.get("risk_label", ""))
     return {
         "risk_label": label,
@@ -165,7 +318,7 @@ async def intervention(request: Request, payload: PredictionRequest) -> dict:
 @app.post("/interventions")
 @limiter.limit(os.getenv("INTERVENTION_RATE_LIMIT", "30/minute"))
 async def log_intervention(request: Request, payload: InterventionRequest) -> dict:
-    record = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+    record = _to_payload_dict(payload)
     record.update(
         {
             "id": str(uuid.uuid4()),
@@ -198,7 +351,7 @@ def list_interventions(
 @app.post("/performance")
 @limiter.limit(os.getenv("INTERVENTION_RATE_LIMIT", "30/minute"))
 async def log_performance(request: Request, payload: PerformanceRecordRequest) -> dict:
-    record = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+    record = _to_payload_dict(payload)
     before = record["before"]
     after = record["after"]
     delta = {
@@ -231,17 +384,13 @@ def list_performance(student_id: Optional[str] = None) -> dict:
 @app.post("/alerts/high-risk")
 @limiter.limit(os.getenv("INTERVENTION_RATE_LIMIT", "30/minute"))
 async def high_risk_alerts(request: Request, payload: BatchPredictionRequest) -> dict:
-    response = await call_ml_api(payload, ML_API_BATCH_URL)
+    response = await predict_batch(request, payload)
     items = response.get("items", [])
     alerts = [
         item
         for item in items
         if str(item.get("risk_label", "")).lower() == "high"
-        or float(
-            item.get("risk_score_predicted")
-            or item.get("risk_score_calculated")
-            or 0
-        )
+        or float(item.get("risk_score_predicted") or item.get("risk_score_calculated") or 0)
         >= ALERT_SCORE_THRESHOLD
     ]
     return {"count": len(alerts), "items": alerts}
