@@ -1,0 +1,73 @@
+{
+  "feature_stats": {
+    "assignment": {
+      "min": 30.0,
+      "max": 99.0,
+      "mean": 64.45042,
+      "std": 20.186076671246138,
+      "p25": 47.0,
+      "p50": 65.0,
+      "p75": 82.0
+    },
+    "attendance": {
+      "min": 40.0,
+      "max": 99.0,
+      "mean": 69.6593,
+      "std": 17.312072598829793,
+      "p25": 55.0,
+      "p50": 70.0,
+      "p75": 85.0
+    },
+    "lms": {
+      "min": 20.0,
+      "max": 99.0,
+      "mean": 59.35738,
+      "std": 23.092708048189152,
+      "p25": 39.0,
+      "p50": 59.0,
+      "p75": 79.0
+    },
+    "marks": {
+      "min": 30.0,
+      "max": 99.0,
+      "mean": 64.53546,
+      "std": 20.216268610669246,
+      "p25": 47.0,
+      "p50": 65.0,
+      "p75": 82.0
+    },
+    "risk_score": {
+      "min": 3.2,
+      "max": 65.2,
+      "mean": 33.94982,
+      "std": 10.335701935635047,
+      "p25": 26.6,
+      "p50": 34.0,
+      "p75": 41.2
+    }
+  },
+  "classification_feature_importance": {
+    "assignment": 0.20739777386188507,
+    "attendance": 0.3735755383968353,
+    "lms": 0.0942135751247406,
+    "marks": 0.3248131275177002
+  },
+  "regression_feature_importance": {
+    "assignment": 0.16669848561286926,
+    "attendance": 0.47236451506614685,
+    "lms": 0.06920137256383896,
+    "marks": 0.2917356491088867
+  },
+  "risk_score_weights": {
+    "attendance": 0.35,
+    "marks": 0.3,
+    "assignment": 0.2,
+    "lms": 0.15
+  },
+  "feature_columns": [
+    "assignment",
+    "attendance",
+    "lms",
+    "marks"
+  ]
+}
